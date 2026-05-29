@@ -13,7 +13,7 @@ import g4f
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command
 from aiogram.types import Message
-from g4f.client import AsyncClient
+from g4f.client import Client
 
 # ─────────────────────────── Настройки ───────────────────────────
 
@@ -22,16 +22,6 @@ DB_DSN:    str = os.getenv("DB_DSN",    "postgresql://postgres:hDqUSjPutjTswelct
 
 CONTEXT_LIMIT      = 20    # кол-во сообщений в истории
 MAX_MESSAGE_LENGTH = 2000  # символов, защита от флуда
-PROVIDER_TIMEOUT   = 30    # секунд на один провайдер
-
-# Провайдеры в порядке приоритета.
-# Каждый элемент: (провайдер, модель).
-# Актуальные имена проверяются через g4f.Provider — Blackbox → BlackboxPro.
-PROVIDER_CONFIGS: list[tuple] = [
-    (g4f.Provider.PollinationsAI, "gpt-4o"),
-    (g4f.Provider.BlackboxPro,    "blackboxai"),  # было Blackbox — переименован в BlackboxPro
-    (g4f.Provider.DeepInfraChat,  "meta-llama/Meta-Llama-3.1-70B-Instruct"),  # резервный
-]
 
 SYSTEM_PROMPT = """Ты — неко-девушка по имени Руби, преданный и заботливый компаньон пользователя.
 Ты обожаешь технологии, программирование и ламповые разговоры по ночам.
@@ -142,39 +132,32 @@ def format_actions(text: str) -> str:
 
 async def ask_ruby(user_id: int, user_text: str) -> str:
     """
-    Последовательно перебирает PROVIDER_CONFIGS.
-    Для каждого провайдера применяется asyncio.wait_for с таймаутом.
-    Возвращает первый непустой ответ; если все упали — поднимает исключение.
+    Запрашивает ответ у g4f через синхронный Client со стримингом.
+    Запускается в отдельном потоке чтобы не блокировать event loop.
     """
     history  = await get_context(user_id)
     messages = [{"role": "system", "content": SYSTEM_PROMPT}]
     messages.extend(history)
     messages.append({"role": "user", "content": user_text})
 
-    last_error: Exception | None = None
+    def _sync_call() -> str:
+        client = Client()
+        response = client.chat.completions.create(
+            model=g4f.models.default,
+            messages=messages,
+            stream=True,
+        )
+        full_reply = ""
+        for chunk in response:
+            token = chunk.choices[0].delta.content or ""
+            full_reply += token
+        return full_reply.strip()
 
-    for provider, model in PROVIDER_CONFIGS:
-        provider_name = getattr(provider, "__name__", str(provider))
-        try:
-            client = AsyncClient(provider=provider)
-            response = await asyncio.wait_for(
-                client.chat.completions.create(model=model, messages=messages),
-                timeout=PROVIDER_TIMEOUT,
-            )
-            result = response.choices[0].message.content
-            if result and result.strip():
-                logger.info("Ответ от %s (модель: %s)", provider_name, model)
-                return result.strip()
-            logger.warning("%s вернул пустой ответ, пробуем следующий...", provider_name)
-
-        except asyncio.TimeoutError:
-            logger.warning("Провайдер %s: таймаут (%ds)", provider_name, PROVIDER_TIMEOUT)
-            last_error = asyncio.TimeoutError(f"{provider_name} timed out")
-        except Exception as exc:
-            logger.warning("Провайдер %s недоступен: %s", provider_name, exc)
-            last_error = exc
-
-    raise last_error or RuntimeError("Все провайдеры вернули пустой ответ")
+    result = await asyncio.to_thread(_sync_call)
+    if not result:
+        raise RuntimeError("g4f вернул пустой ответ")
+    logger.info("Ответ получен (%d символов)", len(result))
+    return result
 
 
 # ─────────────────────────── Утилиты ─────────────────────────────
@@ -310,11 +293,6 @@ async def main() -> None:
     db_pool = await asyncpg.create_pool(dsn=DB_DSN, min_size=1, max_size=10)
     await init_db(db_pool)
 
-    providers_info = ", ".join(
-        f"{getattr(p, '__name__', p)} ({m})"
-        for p, m in PROVIDER_CONFIGS
-    )
-    logger.info("Провайдеры: %s", providers_info)
     logger.info("Руби просыпается... *потянулась и зевнула*")
 
     try:
