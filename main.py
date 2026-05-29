@@ -8,11 +8,12 @@ import logging
 import re
 
 import asyncpg
+import g4f
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command
 from aiogram.types import Message
 from g4f.client import AsyncClient
-from g4f.Provider import DDG, Blackbox, RetryProvider
+from g4f.providers.retry_provider import RetryProvider
 
 # ─────────────────────────── Настройки ───────────────────────────
 
@@ -69,7 +70,6 @@ async def init_db(pool: asyncpg.Pool) -> None:
 # ─────────────────────────── Хелперы БД ──────────────────────────
 
 async def save_message(user_id: int, role: str, content: str) -> None:
-    """Сохраняет одно сообщение в историю пользователя."""
     async with db_pool.acquire() as conn:
         await conn.execute(
             "INSERT INTO messages (user_id, role, content) VALUES ($1, $2, $3)",
@@ -78,7 +78,6 @@ async def save_message(user_id: int, role: str, content: str) -> None:
 
 
 async def get_context(user_id: int) -> list[dict]:
-    """Возвращает последние CONTEXT_LIMIT сообщений в формате [{role, content}]."""
     async with db_pool.acquire() as conn:
         rows = await conn.fetch(
             """
@@ -97,7 +96,6 @@ async def get_context(user_id: int) -> list[dict]:
 
 
 async def clear_context(user_id: int) -> None:
-    """Удаляет всю историю пользователя."""
     async with db_pool.acquire() as conn:
         await conn.execute("DELETE FROM messages WHERE user_id = $1", user_id)
 
@@ -105,15 +103,10 @@ async def clear_context(user_id: int) -> None:
 # ─────────────────────────── MarkdownV2 ──────────────────────────
 
 def escape_md(text: str) -> str:
-    """Экранирует спецсимволы для MarkdownV2 в Telegram."""
     return re.sub(r"([_\*\[\]()~`>#\+\-=\|{}\.\!\\])", r"\\\1", text)
 
 
 def format_actions(text: str) -> str:
-    """
-    Конвертирует *действия в звёздочках* → _курсив_ MarkdownV2,
-    а остальной текст экранирует.
-    """
     parts = re.split(r"\*([^*]+)\*", text)
     result = []
     for i, part in enumerate(parts):
@@ -126,17 +119,15 @@ def format_actions(text: str) -> str:
 
 # ─────────────────────────── G4F ─────────────────────────────────
 
-# Провайдеры в порядке приоритета: DDG → Blackbox
-# Оба бесплатны и не требуют API-ключей
-g4f_provider = RetryProvider([DDG, Blackbox], shuffle=False)
-g4f_client = AsyncClient()
+# Провайдеры в порядке приоритета (оба бесплатны, без API-ключей)
+g4f_provider = RetryProvider(
+    [g4f.Provider.PollinationsAI, g4f.Provider.Blackbox],
+    shuffle=False,
+)
+g4f_client = AsyncClient(provider=g4f_provider)
 
 
 async def ask_ruby(user_id: int, user_text: str) -> str:
-    """
-    Строит контекст из БД, добавляет новое сообщение пользователя,
-    отправляет запрос через g4f и возвращает ответ.
-    """
     history = await get_context(user_id)
     messages = [{"role": "system", "content": SYSTEM_PROMPT}]
     messages.extend(history)
@@ -145,7 +136,6 @@ async def ask_ruby(user_id: int, user_text: str) -> str:
     response = await g4f_client.chat.completions.create(
         model="gpt-4o-mini",
         messages=messages,
-        provider=g4f_provider,
     )
     return response.choices[0].message.content
 
@@ -154,7 +144,6 @@ async def ask_ruby(user_id: int, user_text: str) -> str:
 
 @dp.message(Command("start"))
 async def cmd_start(message: Message) -> None:
-    """Инициализация пользователя и приветственное сообщение."""
     user_id = message.from_user.id
     logger.info("Команда /start от user_id=%s", user_id)
 
@@ -172,7 +161,6 @@ async def cmd_start(message: Message) -> None:
 
 @dp.message(Command("clear"))
 async def cmd_clear(message: Message) -> None:
-    """Очистка истории пользователя."""
     user_id = message.from_user.id
     await clear_context(user_id)
     logger.info("История очищена для user_id=%s", user_id)
@@ -187,7 +175,6 @@ async def cmd_clear(message: Message) -> None:
 
 @dp.message(F.text)
 async def handle_text(message: Message) -> None:
-    """Основной хендлер текстовых сообщений."""
     user_id = message.from_user.id
     user_text = message.text.strip()
 
@@ -196,10 +183,8 @@ async def handle_text(message: Message) -> None:
 
     logger.info("Сообщение от user_id=%s: %s", user_id, user_text[:80])
 
-    # Сохраняем сообщение пользователя
     await save_message(user_id, "user", user_text)
 
-    # Показываем индикатор печати пока AI думает
     async def keep_typing():
         while True:
             try:
