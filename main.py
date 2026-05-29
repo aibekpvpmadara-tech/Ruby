@@ -121,7 +121,7 @@ def format_actions(text: str) -> str:
 
 # Провайдеры в порядке приоритета (оба бесплатны, без API-ключей)
 g4f_provider = RetryProvider(
-    [g4f.Provider.PollinationsAI, g4f.Provider.Blackbox],
+    [g4f.Provider.PollinationsAI, g4f.Provider.BlackboxPro],
     shuffle=False,
 )
 g4f_client = AsyncClient(provider=g4f_provider)
