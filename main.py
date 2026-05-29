@@ -1,18 +1,18 @@
 """
 Ruby — неко-девушка компаньон
-Telegram бот на aiogram 3.x + asyncpg + g4f (DeepSeek)
+Telegram бот на aiogram 3.x + asyncpg + g4f
 """
 
 import asyncio
 import logging
 import re
-from datetime import datetime
 
 import asyncpg
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command
 from aiogram.types import Message
 from g4f.client import AsyncClient
+from g4f.Provider import DDG, Blackbox, RetryProvider
 
 # ─────────────────────────── Настройки ───────────────────────────
 
@@ -104,12 +104,8 @@ async def clear_context(user_id: int) -> None:
 
 # ─────────────────────────── MarkdownV2 ──────────────────────────
 
-# Символы, которые нужно экранировать в MarkdownV2
-_MD_SPECIAL = r"\_*[]()~`>#+-=|{}.!"
-
 def escape_md(text: str) -> str:
     """Экранирует спецсимволы для MarkdownV2 в Telegram."""
-    # Экранируем все спецсимволы обратным слешем
     return re.sub(r"([_\*\[\]()~`>#\+\-=\|{}\.\!\\])", r"\\\1", text)
 
 
@@ -117,32 +113,29 @@ def format_actions(text: str) -> str:
     """
     Конвертирует *действия в звёздочках* → _курсив_ MarkdownV2,
     а остальной текст экранирует.
-    Шаги:
-      1. Сплитим текст по *...*
-      2. Чётные части — обычный текст (экранируем)
-      3. Нечётные части — действия (экранируем и оборачиваем в _..._)
     """
     parts = re.split(r"\*([^*]+)\*", text)
     result = []
     for i, part in enumerate(parts):
         if i % 2 == 0:
-            # Обычный текст
             result.append(escape_md(part))
         else:
-            # Действие в звёздочках → курсив
             result.append(f"_{escape_md(part)}_")
     return "".join(result)
 
 
-# ─────────────────────────── G4F / DeepSeek ──────────────────────
+# ─────────────────────────── G4F ─────────────────────────────────
 
+# Провайдеры в порядке приоритета: DDG → Blackbox
+# Оба бесплатны и не требуют API-ключей
+g4f_provider = RetryProvider([DDG, Blackbox], shuffle=False)
 g4f_client = AsyncClient()
 
 
 async def ask_ruby(user_id: int, user_text: str) -> str:
     """
     Строит контекст из БД, добавляет новое сообщение пользователя,
-    отправляет запрос к DeepSeek через g4f и возвращает ответ.
+    отправляет запрос через g4f и возвращает ответ.
     """
     history = await get_context(user_id)
     messages = [{"role": "system", "content": SYSTEM_PROMPT}]
@@ -150,8 +143,9 @@ async def ask_ruby(user_id: int, user_text: str) -> str:
     messages.append({"role": "user", "content": user_text})
 
     response = await g4f_client.chat.completions.create(
-        model="deepseek-chat",
+        model="gpt-4o-mini",
         messages=messages,
+        provider=g4f_provider,
     )
     return response.choices[0].message.content
 
@@ -205,7 +199,7 @@ async def handle_text(message: Message) -> None:
     # Сохраняем сообщение пользователя
     await save_message(user_id, "user", user_text)
 
-    # Показываем индикатор печати и держим его, пока AI думает
+    # Показываем индикатор печати пока AI думает
     async def keep_typing():
         while True:
             try:
@@ -218,9 +212,7 @@ async def handle_text(message: Message) -> None:
 
     try:
         reply_text = await ask_ruby(user_id, user_text)
-        # Сохраняем ответ ИИ
         await save_message(user_id, "assistant", reply_text)
-        # Форматируем для MarkdownV2
         formatted = format_actions(reply_text)
         await message.answer(formatted, parse_mode="MarkdownV2")
 
